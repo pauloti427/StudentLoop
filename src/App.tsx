@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowDownUp, ArrowRight, Bell, Bookmark, CalendarDays, Check, ChevronDown, ChevronRight, Compass, Flame, Heart, Home, ImagePlus, Leaf, Link2, MapPin, MessageCircle, MoreHorizontal, Plus, Search, Send, Settings, Smile, Sparkles, Users, X } from 'lucide-react';
 import { clubs, students, interests, events, initialPosts, loops, portrait, type Post } from './data';
+import { isSupabaseConfigured, supabase } from './lib/supabase';
+import { AuthGate } from './components/AuthGate';
 const read = <T,>(key: string, fallback: T): T => { try { return JSON.parse(localStorage.getItem(key) || 'null') ?? fallback; } catch { return fallback; } };
 type Page = 'Discover' | 'Meet students' | 'Campus feed' | 'Clubs' | 'Messages' | 'Events' | 'Saved posts' | 'My profile';
 function Avatar({id = '11', small = false}: {id?: string; small?: boolean}) {return <img className={`avatar ${small ? 'small' : ''}`} src={portrait(id)} alt="" />;}
@@ -26,6 +28,8 @@ export default function App() {
  const [myClubs,setMyClubs] = useState<string[]>(() => read('studentloop-clubs',[]));
  const [clubFilter,setClubFilter] = useState('All');
  const [eventFilter,setEventFilter] = useState('All events');
+ const [authUserName,setAuthUserName] = useState<string | null>(null);
+ const [currentUserId,setCurrentUserId] = useState<string | null>(null);
  useEffect(() => {localStorage.setItem('studentloop-interests',JSON.stringify(myInterests));},[myInterests]);
  useEffect(() => {localStorage.setItem('studentloop-clubs',JSON.stringify(myClubs));},[myClubs]);
  const toggleClub = (id: string) => setMyClubs(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev,id]);
@@ -52,17 +56,104 @@ export default function App() {
  },[modal]);
  const fileRef = useRef<HTMLInputElement>(null);
  const draftRef = useRef<HTMLTextAreaElement>(null);
- useEffect(() => { if (!localStorage.getItem('studentloop-posts')) fetch('/api/posts').then(r => r.ok ? r.json() : Promise.reject()).then(setPosts).catch(() => {}); },[]);
+ useEffect(() => {
+  const loadAuthUser = async () => {
+   if (!isSupabaseConfigured) return;
+   const { data: { user } } = await supabase.auth.getUser();
+   if (!user) {
+    setCurrentUserId(null);
+    setAuthUserName(null);
+    return;
+   }
+
+   setCurrentUserId(user.id);
+   const { data, error } = await supabase.from('profiles').select('full_name').eq('id', user.id).maybeSingle();
+   if (!error) {
+    setAuthUserName(data?.full_name || user.email || 'Student');
+   } else {
+    setAuthUserName(user.email || 'Student');
+   }
+  };
+
+  loadAuthUser();
+
+  const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+   if (!session?.user) {
+    setCurrentUserId(null);
+    setAuthUserName(null);
+    return;
+   }
+   setCurrentUserId(session.user.id);
+   void loadAuthUser();
+  });
+
+  return () => subscription.unsubscribe();
+ },[]);
+ useEffect(() => {
+  const loadRemotePosts = async () => {
+   if (isSupabaseConfigured) {
+    const { data, error } = await supabase.from('posts').select('*').order('created_at', { ascending: false });
+    if (!error && data?.length) {
+     const mapped = data.map((row: any) => ({
+       id: String(row.id),
+       name: String(row.name ?? 'Unknown'),
+       avatar: String(row.avatar ?? '11'),
+       major: String(row.major ?? ''),
+       time: String(row.time ?? 'Just now'),
+       category: String(row.category ?? 'Campus life'),
+       text: String(row.text ?? ''),
+       image: row.image ? String(row.image) : undefined,
+       likes: Number(row.likes ?? 0),
+       liked: Boolean(row.liked),
+       saved: Boolean(row.saved),
+       comments: Array.isArray(row.comments) ? row.comments : [],
+     }));
+     setPosts(mapped);
+    }
+    return;
+   }
+
+   if (!localStorage.getItem('studentloop-posts')) {
+    fetch('/api/posts').then(r => r.ok ? r.json() : Promise.reject()).then(setPosts).catch(() => {});
+   }
+  };
+
+  loadRemotePosts();
+ },[]);
  useEffect(() => {try {localStorage.setItem('studentloop-posts',JSON.stringify(posts));} catch {setToast('Device storage is full. New posts may not persist here.');}},[posts]);
  useEffect(() => {localStorage.setItem('studentloop-loops',JSON.stringify(joined));},[joined]);
  useEffect(() => {localStorage.setItem('studentloop-going',JSON.stringify(going));},[going]);
  useEffect(() => {localStorage.setItem('studentloop-messages',JSON.stringify(messages));},[messages]);
  useEffect(() => {if (toast) {const timer = setTimeout(() => setToast(''),3500); return () => clearTimeout(timer);}},[toast]);
- const persist = (post: Post) => {fetch(`/api/posts/${post.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(post)}).then(r => {if (!r.ok) throw new Error();}).catch(() => setToast('Saved on this device. Server sync is unavailable.'));};
+ const persist = async (post: Post) => {
+  if (isSupabaseConfigured) {
+   const payload: Record<string, unknown> = {
+     id: post.id,
+     name: post.name,
+     avatar: post.avatar,
+     major: post.major,
+     time: post.time,
+     category: post.category,
+     text: post.text,
+     image: post.image ?? null,
+     likes: post.likes,
+     liked: Boolean(post.liked),
+     saved: Boolean(post.saved),
+     comments: post.comments,
+     user_id: currentUserId,
+   };
+
+   const { error } = await supabase.from('posts').upsert(payload);
+   if (error) setToast('Saved locally. Supabase sync failed.');
+   return;
+  }
+
+  fetch(`/api/posts/${post.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(post)}).then(r => {if (!r.ok) throw new Error();}).catch(() => setToast('Saved on this device. Server sync is unavailable.'));
+ };
  const update = (post: Post) => {setPosts(previous => previous.map(p => p.id === post.id ? post : p));persist(post);};
  const navigate = (next: Page) => {setPage(next);setSearch('');setFilter('For you');};
  const toggleJoin = (name: string) => setJoined(previous => previous.includes(name) ? previous.filter(x => x !== name) : [...previous,name]);
- const publish = () => {if(!draft.trim()) return; const post: Post = {id:crypto.randomUUID(),name:'Alex Morgan',avatar:'11',major:'Psychology · Junior',time:'Just now',category,text:draft.trim(),image:attachment || undefined,likes:0,comments:[]};setPosts(previous => [post,...previous]);persist(post);setDraft('');setAttachment('');setModal(null);setFilter('For you');setPage('Campus feed');setToast('You’re in the loop. Post shared!');};
+ const publish = () => {if(!draft.trim()) return; const post: Post = {id:crypto.randomUUID(),name: authUserName || 'Alex Morgan',avatar:'11',major:'Psychology · Junior',time:'Just now',category,text:draft.trim(),image:attachment || undefined,likes:0,comments:[]};setPosts(previous => [post,...previous]);persist(post);setDraft('');setAttachment('');setModal(null);setFilter('For you');setPage('Campus feed');setToast('You’re in the loop. Post shared!');};
  const visiblePosts = posts.filter(p => (page !== 'Saved posts' || p.saved) && (page !== 'My profile' || p.name === 'Alex Morgan') && (filter === 'For you' || filter === 'Trending' || (filter === 'Following' ? joined.includes(p.category) : p.category === filter)) && `${p.text} ${p.name} ${p.category}`.toLowerCase().includes(search.toLowerCase())).sort((a,b) => (sort || filter === 'Trending') ? b.likes - a.likes : 0);
  const composer = <div className="composer card"><div className="compose-top"><Avatar/><textarea ref={draftRef} aria-label="Write a post" placeholder="What’s happening on campus, Alex?" maxLength={2000} value={draft} onChange={e => setDraft(e.target.value)}/></div>{attachment && <div className="attachment"><img src={attachment} alt="Your attachment"/><button aria-label="Remove image" onClick={() => setAttachment('')}><X size={16}/></button></div>}<div className="compose-bottom"><div className="compose-tools"><button onClick={() => fileRef.current?.click()}><ImagePlus size={17}/><span>Photo</span></button><button onClick={() => setDraft(d => d + ' ✨')}><Smile size={17}/><span>Feeling</span></button><label className="category"><Leaf size={15}/><select aria-label="Post loop" value={category} onChange={e => setCategory(e.target.value)}>{loops.map(l => <option key={l.name}>{l.name}</option>)}</select></label></div><button className="primary post-button" disabled={!draft.trim()} onClick={publish}>Post <ArrowRight size={16}/></button></div></div>;
  const renderPost = (post: Post) => <article className="post card" id={`post-${post.id}`} key={post.id}><div className="post-header"><Avatar id={post.avatar}/><div className="post-author"><strong>{post.name}<span className="verified"><Check size={9}/></span></strong><span>{post.major}<span className="dot">·</span>{post.time}</span></div><button className="icon-button" aria-label={`More options for ${post.name}'s post`} onClick={() => setModal(`post:${post.id}`)}><MoreHorizontal size={21}/></button></div><button className={`tag ${loops.find(l => l.name === post.category)?.color}`} onClick={() => {setFilter(post.category);setPage('Campus feed');}}>{loops.find(l => l.name === post.category)?.icon} {post.category}</button><p className="post-text">{post.text}</p>{post.image && <img className="post-image" src={post.image} alt="A green college campus with a historic library"/>}<div className="post-actions"><button className={post.liked ? 'liked' : ''} aria-label={`${post.liked ? 'Unlike' : 'Like'} post by ${post.name}`} aria-pressed={!!post.liked} onClick={() => update({...post,liked:!post.liked,likes:post.likes + (post.liked ? -1 : 1)})}><Heart size={18} fill={post.liked ? 'currentColor' : 'none'}/>{post.likes}</button><button aria-label={`Comments on ${post.name}'s post`} onClick={() => {setExpanded(expanded === post.id ? null : post.id);setReply('');}}><MessageCircle size={18}/>{post.comments.length}<span className="comments-label"> comments</span></button><button aria-label="Share post" onClick={() => {navigator.clipboard?.writeText(`${location.origin}/#post-${post.id}`).then(() => setToast('Post link copied!')).catch(() => setToast('Could not copy link.'));}}><Send size={17}/></button><button className={`save-button ${post.saved ? 'active-save' : ''}`} aria-label={post.saved ? 'Unsave post' : 'Save post'} aria-pressed={!!post.saved} onClick={() => update({...post,saved:!post.saved})}><Bookmark size={18} fill={post.saved ? 'currentColor' : 'none'}/></button></div>{expanded === post.id && <div className="comments">{post.comments.map((c,i) => <div className="comment" key={i}><strong>{c.name}</strong><p>{c.text}</p></div>)}<form onSubmit={e => {e.preventDefault();if(reply.trim()) {update({...post,comments:[...post.comments,{name:'Alex Morgan',text:reply.trim()}]});setReply('');}}}><input aria-label="Write a comment" value={reply} onChange={e => setReply(e.target.value)} placeholder="Add to the conversation…" maxLength={1000}/><button className="icon-button" aria-label="Send comment" disabled={!reply.trim()}><Send size={18}/></button></form></div>}</article>;
@@ -72,7 +163,7 @@ export default function App() {
  <div className="content-layout"><main><section className="page-heading"><div><div className="eyebrow">A LITTLE MORE CONNECTED</div><h1>{page === 'Discover' ? 'Find your people Everywhere. Get involved Today.' : page === 'Campus feed' ? 'Campus conversations' : page}</h1><p>{page === 'Discover' ? 'Local clubs, things to do, and students who share your interests.' : page === 'Meet students' ? 'Start with something in common. See where it goes.' : page === 'Campus feed' ? 'Keep the conversation going with your campus community.' : page === 'Clubs' ? 'Find your next community, on campus and around town.' : page === 'Events' ? 'Good things happen when you show up.' : page === 'Messages' ? 'Turn a campus connection into a conversation.' : page === 'Saved posts' ? 'The good stuff, kept for later.' : 'A familiar face around campus.'}</p></div><span className="heading-doodle">✳</span></section>
  {page === 'Discover' && <><section className="welcome-banner discovery-banner"><div><span className="banner-label"><span/> ON CAMPUS & AROUND TOWN</span><h2>Your next connection<br/>starts here.</h2><p>Join a club. Make a plan. Meet your people.</p><div className="hero-actions"><button onClick={() => navigate('Clubs')}>Find a club <ArrowRight size={16}/></button><button onClick={() => navigate('Events')}>Explore events <CalendarDays size={16}/></button></div></div><div className="discovery-illustration" aria-hidden="true"><span>☕</span><span>🎨</span><span>🏕️</span><b>better together.</b></div></section>{interestPicker}<section className="discovery-section"><div className="discovery-section-heading"><div><h2>Make a plan this week</h2><p>A few easy ways to get out and get involved.</p></div><button className="text-link" onClick={() => navigate('Events')}>All events <ArrowRight size={16}/></button></div><div className="home-events">{events.map(event => <button className="card home-event" key={event.id} onClick={() => setModal(event.id)}><span className={`date-tile ${event.color}`}><small>{event.month}</small><strong>{event.day}</strong></span><span><strong>{event.name}</strong><small>{event.detail}</small><em>{going.includes(event.id) ? '✓ You’re going' : 'Free · Everyone welcome'}</em></span><ChevronRight size={18}/></button>)}</div></section><section className="discovery-section"><div className="discovery-section-heading"><div><h2>Clubs for your kind of thing</h2><p>Suggestions based on your interests.</p></div><button className="text-link" onClick={() => navigate('Clubs')}>All clubs <ArrowRight size={16}/></button></div><div className="discovery-grid">{recommendedClubs.slice(0,2).map(clubCard)}</div></section><section className="discovery-section"><div className="discovery-section-heading"><div><h2>Start with something in common</h2><p>Meet students who enjoy the things you do.</p></div><button className="text-link" onClick={() => navigate('Meet students')}>Meet students <ArrowRight size={16}/></button></div><div className="discovery-grid">{recommendedStudents.slice(0,2).map(personCard)}</div></section><button className="secondary feed-invitation" onClick={() => navigate('Campus feed')}>See what your campus is talking about <ArrowRight size={16}/></button><p className="discovery-demo">Explore a demo campus with sample clubs, events, and student profiles.</p></>}
  {page === 'Campus feed' && composer}
- {['Campus feed','Saved posts','My profile'].includes(page) && <>{page === 'My profile' && <div className="card profile-card"><Avatar/><h2>Alex Morgan <span className="verified"><Check size={10}/></span></h2><p>Psychology · Junior · Oakridge University</p><p>Coffee enthusiast. Finding my people, one loop at a time. 🌱</p><span>{posts.filter(p => p.name === 'Alex Morgan').length} posts · {joined.length} conversation topics followed · {myClubs.length} clubs joined</span><button className="secondary" onClick={() => navigate('Saved posts')}>View saved posts</button></div>}<div className="feed-tabs"><div>{['For you','Following','Trending'].map(tab => <button key={tab} className={filter === tab ? 'active' : ''} onClick={() => setFilter(tab)}>{tab === 'Trending' && <Flame size={15}/>} {tab}</button>)}{!['For you','Following','Trending'].includes(filter) && <button className="active" onClick={() => setFilter('For you')}>{filter}<X size={13}/></button>}</div><button className="sort-button" onClick={() => setSort(!sort)}><ArrowDownUp size={14}/>{sort ? 'Popular' : 'Latest'}</button></div><div className="feed">{visiblePosts.length ? visiblePosts.map(renderPost) : <div className="card empty-state"><Bookmark size={32}/><h3>{search ? 'No conversations found' : 'A fresh start'}</h3><p>{search ? 'Try a different name, topic, or keyword.' : page === 'Saved posts' ? 'Tap the bookmark on a post to keep it here.' : 'Share something with your campus to get things going.'}</p></div>}</div><div className="feed-end"><Leaf size={15}/> You’re right where you belong.</div></>}
+ {['Campus feed','Saved posts','My profile'].includes(page) && <>{page === 'My profile' && <><AuthGate /><div className="card profile-card"><Avatar/><h2>{authUserName || 'Alex Morgan'} <span className="verified"><Check size={10}/></span></h2><p>Psychology · Junior · Oakridge University</p><p>Coffee enthusiast. Finding my people, one loop at a time. 🌱</p><span>{posts.filter(p => p.name === 'Alex Morgan').length} posts · {joined.length} conversation topics followed · {myClubs.length} clubs joined</span><button className="secondary" onClick={() => navigate('Saved posts')}>View saved posts</button></div></>}<div className="feed-tabs"><div>{['For you','Following','Trending'].map(tab => <button key={tab} className={filter === tab ? 'active' : ''} onClick={() => setFilter(tab)}>{tab === 'Trending' && <Flame size={15}/>} {tab}</button>)}{!['For you','Following','Trending'].includes(filter) && <button className="active" onClick={() => setFilter('For you')}>{filter}<X size={13}/></button>}</div><button className="sort-button" onClick={() => setSort(!sort)}><ArrowDownUp size={14}/>{sort ? 'Popular' : 'Latest'}</button></div><div className="feed">{visiblePosts.length ? visiblePosts.map(renderPost) : <div className="card empty-state"><Bookmark size={32}/><h3>{search ? 'No conversations found' : 'A fresh start'}</h3><p>{search ? 'Try a different name, topic, or keyword.' : page === 'Saved posts' ? 'Tap the bookmark on a post to keep it here.' : 'Share something with your campus to get things going.'}</p></div>}</div><div className="feed-end"><Leaf size={15}/> You’re right where you belong.</div></>}
  {page === 'Clubs' && <>{interestPicker}<div className="discovery-filters" aria-label="Filter clubs">{['All','My clubs',...interests].map(item => <button aria-pressed={clubFilter === item} key={item} onClick={() => setClubFilter(item)}>{item}</button>)}</div><div className="discovery-grid">{recommendedClubs.filter(club => clubFilter === 'All' || (clubFilter === 'My clubs' ? myClubs.includes(club.id) : club.interest === clubFilter)).map(clubCard)}</div>{clubFilter === 'My clubs' && !myClubs.length && <div className="card empty-state"><Users size={32}/><h3>Your community starts here</h3><p>Join a club to keep it handy here.</p><button className="secondary" onClick={() => setClubFilter('All')}>Discover clubs</button></div>}</>}
  {page === 'Meet students' && <>{interestPicker}<div className="discovery-grid">{recommendedStudents.map(personCard)}</div></>}
  {page === 'Events' && <><div className="discovery-filters">{['All events','My plans'].map(label => <button key={label} aria-pressed={eventFilter === label} onClick={() => setEventFilter(label)}>{label}</button>)}</div>{eventFilter === 'My plans' && !going.length && <div className="card empty-state"><CalendarDays size={32}/><h3>Make your first plan</h3><p>RSVP to an event and it will appear here.</p></div>}<div className="event-grid">{events.filter(event => eventFilter !== 'My plans' || going.includes(event.id)).map(event => <div className="card event-card" key={event.id}><div className={`event-art ${event.color}`}><span>{event.icon}</span><div className="date-tile"><small>{event.month}</small><strong>{event.day}</strong></div></div><h2>{event.name}</h2><p className="event-location"><MapPin size={15}/>{event.detail}</p><p className="event-host">Hosted by {clubs.find(club => club.event === event.id)?.name} · Free · Everyone welcome</p><p>{event.description}</p><button className={going.includes(event.id) ? 'secondary' : 'primary'} onClick={() => setGoing(prev => prev.includes(event.id) ? prev.filter(id => id !== event.id) : [...prev,event.id])}>{going.includes(event.id) ? <><Check size={16}/> You’re going</> : 'Count me in'} </button></div>)}</div></>}

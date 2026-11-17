@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/data.ts","./src/main.tsx","./server/index.ts","./vite.config.ts"],"version":"5.7.3"}
+{"root":["./src/app.tsx","./src/data.ts","./src/main.tsx","./src/vite-env.d.ts","./src/components/authgate.tsx","./src/lib/auth.ts","./src/lib/supabase.ts","./server/index.ts","./vite.config.ts"],"version":"5.7.3"}
